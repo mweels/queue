@@ -8,7 +8,7 @@
       cb(null, "cool");
     },
     cronPattern: "* * * * * *",
-    runCountStop: 10,
+    runCountStop: 1000,
     runCount: 0,
     runsLeft : function() {
       return this.runCountStop - this.runCount;

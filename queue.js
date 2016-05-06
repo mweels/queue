@@ -1,26 +1,32 @@
 var inherits = require('inherits');
 var EventEmitter = require('events').EventEmitter;
 var CronJob = require('cron').CronJob;
+var _ = require("underscore");
+var serialize = require('node-serialize');
+var fs = require('fs');
 
 module.exports = Queue;
 
 function Queue(options) {
-  
-  
+
+
   if (!(this instanceof Queue))
     return new Queue(options);
-
 
   var self = this;
   EventEmitter.call(this);
   options = options || {};
-  this.concurrency = options.concurrency || Infinity;
+  this.fn = __dirname + "/state.json";
+  this.concurrency = options.concurrency || 4;
   this.timeout = options.timeout || 0;
   this.pending = 0;
   this.session = 0;
   this.running = false;
   this.jobs = [];
   this.crons = {};
+
+  this.restore();
+  this.start();
 }
 
 inherits(Queue, EventEmitter);
@@ -49,36 +55,78 @@ Object.defineProperty(Queue.prototype, 'length', {
   }
 });
 
-Queue.prototype.addCron = function (job) {
+Queue.prototype.getModel = function () {
+  var jobs = _.map(this.jobs, function (v) {
+    return { id: v.id, description: v.description, runCount: v.runCount, errorCount: v.errorCount, runsLeft: v.runsLeft(), running: v.running };
+  })
+
+  var crons = _.map(this.crons, function (v) {
+    if (v)
+      return { jobId: v.context ? v.context.job.id : {}, cronTime: v.cronTime, running: v.running };
+  });
+
+  return { jobs: jobs, crons: crons };
+}
+
+Queue.prototype.save = function (callback) {
+
+  console.log("Queue Saving..");
+  var objS = serialize.serialize({ jobs: this.jobs, crons: this.crons});
+
+  fs.writeFile(this.fn, objS, (err) => {
+    if (err) {
+      callback(err, null);
+    } else {
+
+      console.log("Queue Saved..");
+      callback(null, this.fn);
+    }
+  });
+}
+
+Queue.prototype.restore = function (callback) {
+
+  console.log("Restoring Queue..");
+
+  var o = serialize.unserialize(fs.readFileSync(this.fn, { encoding: 'utf8' }));
+  this.jobs = [];
+    
+    this.jobs = o.jobs;
   
-  var context = { job : job, queue: this }
+  //if (o.jobs.isArray
+ this.crons = o.crons;
+
+
+};
+
+Queue.prototype.addCron = function (job) {
+
+  var context = { job: job, queue: this }
   if (job.cronPattern) {
     var cronJob = new CronJob({
       cronTime: job.cronPattern,
       onTick: function () {
-        console.log(this.job.runTime);                                       
-        this.queue.jobs.push(this.job);            
-        this.queue.start();        
+        this.queue.jobs.push(this.job);
+        this.queue.start();
       },
       start: true,
       timeZone: 'America/Los_Angeles',
       context
-    });    
-    
+    });
+
     this.crons[job.id] = cronJob;
-    
+
   }
-  else
-  {
+  else {
     throw ("No cron information was passed.");
   }
 }
 
 Queue.prototype.start = function (cb) {
   if (cb) {
-    
+
     callOnErrorOrEnd.call(this, cb);
-    
+
   }
 
   if (this.pending === this.concurrency) {
@@ -86,24 +134,23 @@ Queue.prototype.start = function (cb) {
   }
 
   if (this.jobs.length === 0) {
-    if (this.pending === 0) {11
+    if (this.pending === 0) {
+      11
       done.call(this);
     }
     return;
   }
   var self = this;
   var job = this.jobs.shift();
-  
-  
+
+
   var once = true;
   var session = this.session;
   var timeoutId = null;
   var didTimeout = false;
 
   function next(err, result) {
-    
-    console.log(job)
-    
+
     if (once && self.session === session) {
       once = false;
       self.pending--;
@@ -111,31 +158,30 @@ Queue.prototype.start = function (cb) {
         clearTimeout(timeoutId);
       }
 
-      if (err) {     
-           
-                      
-        if ((job.onError() || (job.runsLeft() <=0 || !job.cronPattern))) {
-          
-          if (job.errorCountStop <= job.errorCount){
-          
-            if (self.crons[job.id])
-            {
-              self.crons[job.id].stop();              
+      if (err) {
+
+
+        if ((job.onError() || (job.runsLeft() <= 0 || !job.cronPattern))) {
+
+          if (job.errorCountStop <= job.errorCount) {
+
+            if (self.crons[job.id]) {
+              self.crons[job.id].stop();
               self.crons[job.id] = null;
             }
           }
-          else {        
-          job.errorCount++;
-          job.lastTime = (job.lastTime * 20);
-          setTimeout(function() {
-            self.jobs.push(job);
-            self.start();
-          },job.lastTime);
+          else {
+            job.errorCount++;
+            job.lastTime = (job.lastTime * 20);
+            setTimeout(function () {
+              self.jobs.push(job);
+              self.start();
+            }, job.lastTime);
           }
-          
+
         }
         //self.emit('error', err, self.job);
-        
+
       } else if (didTimeout === false) {
         self.emit('success', result, job);
       }
@@ -147,17 +193,20 @@ Queue.prototype.start = function (cb) {
           self.start();
         }
       }
+
     }
+
+
+
   }
-  
+
   job.runCount++;
-  
-  if (job.runsLeft()<=0 && self.crons[job.id])
-  {
+
+  if (job.runsLeft() <= 0 && self.crons[job.id]) {
     self.crons[job.id].stop();
-    self.crons[job.id]=null;    
+    self.crons[job.id] = null;
   }
-  
+
   if (this.timeout) {
     timeoutId = setTimeout(function () {
       didTimeout = true;
@@ -171,9 +220,10 @@ Queue.prototype.start = function (cb) {
 
   this.pending++;
   this.running = true;
-  
 
-  
+
+  self.emit("update", { jobs: this.jobs, crons: self.crons }, job);
+
   job.run(next);
 
   if (this.jobs.length > 0) {
